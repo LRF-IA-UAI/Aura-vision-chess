@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python test_static.py foto_tablero.jpg)",
+      "Bash(python -c ':*)",
+      "Bash(pip install:*)",
+      "Bash(python -c \"from board_detector import BoardDetector; d = BoardDetector\\(\\); print\\('OK - metodos:', [m for m in dir\\(d\\) if not m.startswith\\('__'\\)]\\)\")",
+      "Bash(python -c \"from piece_classifier import PieceClassifier; c = PieceClassifier\\(\\)\")",
+      "Bash(python -c ':)",
+      "Bash(python download_model.py)",
+      "Bash(python verify_model.py foto_tablero.jpg)",
+      "Bash(python -c \"import ultralytics; print\\(ultralytics.__version__\\)\")",
+      "Bash(python -u -c ':*)",
+      "Bash(python -u verify_model.py foto_tablero.jpg)",
+      "Bash(python camera_pipeline.py)",
+      "Bash(echo \"PID: $!\")",
+      "Bash(start python:*)",
+      "Bash(python camera_pipeline.py B)"
+    ]
+  }
+}

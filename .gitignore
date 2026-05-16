@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+
+# Modelo YOLO (demasiado grande para GitHub — obtener de Roboflow)
+chess_model.pt
+
+# Capturas y referencias de cámara (archivos locales)
+capturas/
+ultima_captura.jpg
+tablero_vacio.jpg
+
+# ArUco generados (se regeneran con generate_aruco_markers.py)
+aruco_marker_*.png
+aruco_markers_imprimir.pdf
+
+# Frontend
+dashboard/frontend/node_modules/
+dashboard/frontend/dist/
+
+# Backend
+dashboard/backend/.deps_ok
+
+# VS Code / IDEs
+.vscode/
+.idea/
+*.suo
