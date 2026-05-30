@@ -50,10 +50,11 @@ _COLOR_YELLOW = (0, 220, 220)
 _BLACK        = (0, 0, 0)
 _WHITE        = (255, 255, 255)
 
-WINDOW_MAIN  = "Feed en vivo — Robot Ajedrecista"
-WINDOW_BOARD = "Tablero detectado — Jugada sugerida"
-WINDOW_BASIC = "Tablero basico — Ocupacion de casillas"   # legacy, no usado por el nuevo modo B
-WINDOW_OCC   = "Ocupacion — Modo B"
+WINDOW_MAIN     = "Feed en vivo — Robot Ajedrecista"
+WINDOW_BOARD    = "Tablero detectado — Jugada sugerida"
+WINDOW_BASIC    = "Tablero basico — Ocupacion de casillas"   # legacy, no usado por el nuevo modo B
+WINDOW_OCC      = "Ocupacion — Modo B"
+WINDOW_SNAPSHOT = "Tablero Tracker — Snapshot"
 
 # ---------------------------------------------------------------------------
 # Estado compartido entre hilo principal y hilo del pipeline
@@ -114,6 +115,17 @@ _mode_b = {
 # Estado del tracker de partida (tecla I)
 # ---------------------------------------------------------------------------
 _tracker = GameStateTracker()
+
+# ---------------------------------------------------------------------------
+# Estado del modo snapshot (teclas I y M) — la ventana se actualiza solo
+# cuando el usuario confirma explícitamente con I o M, no en cada frame.
+# ---------------------------------------------------------------------------
+_snapshot: dict = {
+    "active":    False,
+    "warped":    None,       # np.ndarray — último frame warpeado capturado
+    "team_grid": None,       # team_grid asociado al snapshot
+    "last_move": None,       # dict {from_square, to_square, san, legal} o None
+}
 
 # ---------------------------------------------------------------------------
 # Dashboard web — MQTT, MJPEG y filtro de estabilidad
@@ -441,7 +453,7 @@ def _draw_hud(frame, cam_label, running, pipeline_start,
     cv2.rectangle(frame, (0, h - bar_h), (w, h), (30, 30, 30), -1)
 
     _put_text_outlined(frame,
-                       "SPC: analisis  |  R: calibrar  |  I: init  |  M: movimiento  |  S: guardar PGN  |  B: occ  |  P: photo  |  D: debug  |  Q: salir",
+                       "R: calibrar  |  I: init tracker  |  M: movimiento  |  S: guardar PGN  |  B: live (opcional)  |  D: debug  |  Q: salir",
                        (12, h - 10), scale=0.55, color=_WHITE)
 
     cam_txt = cam_label
@@ -885,6 +897,80 @@ def _b_build_display(warped: np.ndarray,
                        (10, h - 8), scale=0.45, color=_WHITE)
 
     return display
+
+
+# ---------------------------------------------------------------------------
+# Snapshot tracker — ventana estática actualizada por teclas I y M
+# ---------------------------------------------------------------------------
+
+def _update_snapshot_window() -> None:
+    """
+    Reconstruye y muestra la ventana WINDOW_SNAPSHOT con el último snapshot
+    capturado.  Si no hay snapshot activo, no hace nada.
+
+    Flujo:
+    1. Reconstruir occ_grid (bool 8×8) desde _snapshot["team_grid"].
+    2. Llamar a _b_build_display para obtener el display base.
+    3. Si hay last_move, dibujar la flecha origen → destino con cv2.arrowedLine.
+    4. Mostrar en WINDOW_SNAPSHOT (namedWindow debe haberse creado antes).
+    """
+    if not _snapshot["active"]:
+        return
+
+    warped    = _snapshot["warped"]
+    team_grid = _snapshot["team_grid"]
+    last_move = _snapshot["last_move"]
+
+    # 1. Reconstruir occ_grid desde team_grid
+    occ_grid = [[team_grid[r][c] != "EMPTY" for c in range(8)] for r in range(8)]
+
+    # 2. Construir display base (diffs=None → se rellena con ceros internamente)
+    diffs_zero = [[0.0] * 8 for _ in range(8)]
+    display = _b_build_display(
+        warped, occ_grid, team_grid, diffs_zero,
+        count=0, threshold=_mode_b["threshold"], pieces=None
+    )
+
+    # 3. Dibujar flecha si hay last_move
+    if last_move is not None:
+        h, w = display.shape[:2]
+        cell_h = h / 8
+        cell_w = w / 8
+
+        def _sq_center(square: str):
+            """Convierte notación algebraica a pixel center en el display."""
+            file_idx = ord(square[0]) - ord('a')   # a=0 … h=7
+            rank     = int(square[1])               # 1-8
+            row      = 8 - rank                     # row=0 → rank 8 (top)
+            cx = int((file_idx + 0.5) * cell_w)
+            cy = int((row     + 0.5) * cell_h)
+            return (cx, cy)
+
+        from_sq = last_move.get("from_square", "")
+        to_sq   = last_move.get("to_square",   "")
+        legal   = last_move.get("legal", True)
+
+        if from_sq and to_sq:
+            pt1 = _sq_center(from_sq)
+            pt2 = _sq_center(to_sq)
+
+            arrow_color = (255, 255, 0) if legal else (0, 165, 255)  # cyan : orange (BGR)
+
+            # Contorno negro para visibilidad
+            cv2.arrowedLine(display, pt1, pt2, (0, 0, 0),       8, cv2.LINE_AA, tipLength=0.15)
+            cv2.arrowedLine(display, pt1, pt2, arrow_color,      4, cv2.LINE_AA, tipLength=0.15)
+
+            # Etiqueta SAN
+            san_text = last_move.get("san", "")
+            if san_text:
+                tx = max(4, min(pt2[0] - 20, w - 80))
+                ty = max(20, min(pt2[1] - 10, h - 8))
+                cv2.putText(display, san_text, (tx + 1, ty + 1),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 0), 3, cv2.LINE_AA)
+                cv2.putText(display, san_text, (tx, ty),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, arrow_color,  2, cv2.LINE_AA)
+
+    cv2.imshow(WINDOW_SNAPSHOT, display)
 
 
 # ---------------------------------------------------------------------------
@@ -1690,6 +1776,14 @@ def main():
                     )
                     success, msg_i = _tracker.initialize_from_snapshot(team_grid_i)
                     print(f"[camera_pipeline] I: {msg_i}")
+                    if success:
+                        _snapshot["active"]    = True
+                        _snapshot["warped"]    = warped_i.copy()
+                        _snapshot["team_grid"] = [row[:] for row in team_grid_i]
+                        _snapshot["last_move"] = None
+                        cv2.namedWindow(WINDOW_SNAPSHOT, cv2.WINDOW_NORMAL)
+                        cv2.resizeWindow(WINDOW_SNAPSHOT, 600, 600)
+                        _update_snapshot_window()
                     with _state["lock"]:
                         _state["msg_text"]   = f"I: {msg_i}"
                         _state["msg_color"]  = _COLOR_GREEN if success else _COLOR_RED
@@ -1741,6 +1835,20 @@ def main():
                             msg_color_m = _COLOR_GREEN
                         else:
                             msg_color_m = _COLOR_YELLOW
+                        # Actualizar snapshot solo en éxito
+                        _snapshot["active"]    = True
+                        _snapshot["warped"]    = warped_m.copy()
+                        _snapshot["team_grid"] = [row[:] for row in team_grid_m]
+                        _snapshot["last_move"] = {
+                            "from_square": result_m["from_square"],
+                            "to_square":   result_m["to_square"],
+                            "san":         result_m["san"],
+                            "legal":       result_m["legal"],
+                        }
+                        if not cv2.getWindowProperty(WINDOW_SNAPSHOT, cv2.WND_PROP_VISIBLE) >= 1:
+                            cv2.namedWindow(WINDOW_SNAPSHOT, cv2.WINDOW_NORMAL)
+                            cv2.resizeWindow(WINDOW_SNAPSHOT, 600, 600)
+                        _update_snapshot_window()
                     else:
                         print(f"[camera_pipeline] M: {result_m['message']}")
                         msg_color_m = _COLOR_RED
@@ -1802,6 +1910,11 @@ def main():
             print(f"[camera_pipeline] Debug overlay {estado}.")
 
     # ---- Limpieza ----
+    if _snapshot["active"]:
+        try:
+            cv2.destroyWindow(WINDOW_SNAPSHOT)
+        except Exception:
+            pass
     cap.release()
     cv2.destroyAllWindows()
     print("[camera_pipeline] Cerrado.")
