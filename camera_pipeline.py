@@ -718,7 +718,7 @@ def _b_compute_occupancy(warped_cur: np.ndarray,
     team_grid  = []
     pcts       = []
     count      = 0
-    margin_occ = max(1, int(cell * 0.20))   # 60% central
+    margin_occ = max(1, int(cell * 0.15))   # 70% central — más tolerancia para cubos descentrados
 
     for row in range(8):
         row_o = []
@@ -857,30 +857,33 @@ def _b_build_display(warped: np.ndarray,
 
             # contenido central de la celda
             piece = pieces.get(sq) if pieces else None
+            cx    = x0 + cell_w // 2 - 14
+            cy    = y0 + cell_h // 2 + 14
+            cx_sm = x0 + cell_w // 2 - 7
+            cy_sm = y0 + cell_h // 2 + 7
+
             if piece is not None:
-                # Caso 1 — pieza trackeada: letra SAN grande, sin label de equipo
-                lx = x0 + cell_w // 2 - 14
-                ly = y0 + cell_h // 2 + 14
-                if piece.color == "WHITE":
-                    border_col = (0,   0,   0)
-                    txt_col    = (255, 255, 255)
-                else:
-                    border_col = (255, 255, 255)
-                    txt_col    = (0,   0,   0)
-                cv2.putText(display, piece.piece_type, (lx, ly),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, border_col, 5, cv2.LINE_AA)
-                cv2.putText(display, piece.piece_type, (lx, ly),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, txt_col,    3, cv2.LINE_AA)
-            else:
-                # Caso 2/4 — sin pieza trackeada: fallback R/G/? según equipo
-                lbl = _TEAM_LBL.get(team, "")
-                if lbl:
-                    lx = x0 + cell_w // 2 - 7
-                    ly = y0 + cell_h // 2 + 7
-                    cv2.putText(display, lbl, (lx, ly),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0),       3, cv2.LINE_AA)
-                    cv2.putText(display, lbl, (lx, ly),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 1, cv2.LINE_AA)
+                # Caso 1 — pieza trackeada: letra SAN, sin R/G/? adicional
+                text = piece.piece_type
+                fg   = (255, 255, 255) if piece.color == "WHITE" else (0,   0,   0)
+                bg   = (0,   0,   0)   if piece.color == "WHITE" else (255, 255, 255)
+                cv2.putText(display, text, (cx, cy),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, bg, 6, cv2.LINE_AA)
+                cv2.putText(display, text, (cx, cy),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, fg, 2, cv2.LINE_AA)
+            elif team == "RED":
+                # Caso 2a — cubo rojo sin pieza trackeada
+                cv2.putText(display, "R", (cx_sm, cy_sm),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
+            elif team == "GREEN":
+                # Caso 2b — cubo verde sin pieza trackeada
+                cv2.putText(display, "G", (cx_sm, cy_sm),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
+            elif team == "UNKNOWN":
+                # Caso 4 — celda de estado desconocido
+                cv2.putText(display, "?", (cx_sm, cy_sm),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255),   2, cv2.LINE_AA)
+            # else EMPTY: sin contenido central
 
     # --- HUD superior ---
     title = (f"OCUPACION  |  Vacias: {n_empty}  |  "
@@ -923,9 +926,10 @@ def _update_snapshot_window() -> None:
 
     # 2. Construir display base (diffs=None → se rellena con ceros internamente)
     diffs_zero = [[0.0] * 8 for _ in range(8)]
+    pieces_snap = _tracker.pieces if _tracker.is_initialized else None
     display = _b_build_display(
         warped, occ_grid, team_grid, diffs_zero,
-        count=0, threshold=_mode_b["threshold"], pieces=None
+        count=0, threshold=_mode_b["threshold"], pieces=pieces_snap
     )
 
     # 3. Dibujar flecha si hay last_move
@@ -1648,11 +1652,11 @@ def main():
                     outer_corners    = extrapolate_outer_corners(inner_7x7)
                     corners_precisos = _board_detector._ordenar_esquinas(outer_corners)
 
-                    # Expansión 2.5% hacia afuera desde el centroide: compensa el leve
-                    # undershoot que se observa en el debug overlay (el warp corta el borde).
+                    # Expansión 4.5% hacia afuera para compensar undershoot en bordes.
+                    # Subir si las casillas del borde se cortan; bajar si el warp incluye borde rojo.
                     _centroid        = corners_precisos.mean(axis=0)
                     corners_precisos = (corners_precisos
-                                        + 0.025 * (corners_precisos - _centroid)).astype(
+                                        + 0.045 * (corners_precisos - _centroid)).astype(
                                             np.float32)
 
                     # Log en consola

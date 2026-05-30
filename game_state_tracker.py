@@ -346,7 +346,14 @@ class GameStateTracker:
                     cap = "x" if is_capture else ""
                     san = f"{moving_piece.piece_type}{cap}{to_square}?"
                 legal = False
-                msg_parts.append("movimiento ilegal en ajedrez")
+                # Determinar razón concreta de ilegalidad
+                if not self.chess_board.is_pseudo_legal(move):
+                    reason = self._explain_pseudo_illegal(from_square, to_square, moving_piece)
+                elif not self.chess_board.is_legal(move):
+                    reason = "el movimiento dejaría su propio rey en jaque"
+                else:
+                    reason = "movimiento ilegal (razón desconocida)"
+                msg_parts.append(f"Movimiento {san} ({from_square}→{to_square}) — {reason}")
         except Exception as exc:
             san   = f"{to_square}?"
             legal = False
@@ -391,6 +398,57 @@ class GameStateTracker:
             "san":         san,
             "legal":       legal,
         }
+
+    # ------------------------------------------------------------------
+    # Helper: razón geométrica de movimiento pseudo-ilegal
+    # ------------------------------------------------------------------
+
+    def _explain_pseudo_illegal(self, from_sq: str, to_sq: str, piece) -> str:
+        """
+        Devuelve una frase legible explicando por qué el movimiento de `piece`
+        desde `from_sq` hasta `to_sq` no es pseudo-legal (violación geométrica
+        de las reglas de movimiento de la pieza, independientemente del jaque).
+        """
+        ff, fr = ord(from_sq[0]) - ord('a'), int(from_sq[1]) - 1
+        tf, tr = ord(to_sq[0])  - ord('a'), int(to_sq[1])  - 1
+        df, dr = tf - ff, tr - fr
+        piece_type = piece.piece_type
+
+        # Pieza propia en destino
+        dest_piece = self.pieces.get(to_sq)
+        if dest_piece and dest_piece.color == piece.color:
+            return f"hay una pieza propia ({dest_piece.piece_type}) en {to_sq}"
+
+        if piece_type == "K":
+            if max(abs(df), abs(dr)) > 1:
+                return "el rey solo puede moverse 1 casilla por jugada"
+        elif piece_type == "N":
+            if (abs(df), abs(dr)) not in [(1, 2), (2, 1)]:
+                return "el caballo se mueve en L (2+1 o 1+2)"
+        elif piece_type == "B":
+            if abs(df) != abs(dr):
+                return "el alfil solo se mueve en diagonal"
+        elif piece_type == "R":
+            if df != 0 and dr != 0:
+                return "la torre solo se mueve en línea recta horizontal o vertical"
+        elif piece_type == "Q":
+            if not (df == 0 or dr == 0 or abs(df) == abs(dr)):
+                return "la dama se mueve en línea recta o diagonal"
+        elif piece_type == "P":
+            direction  = 1 if piece.color == "WHITE" else -1
+            start_rank = 1 if piece.color == "WHITE" else 6   # 0-indexed
+            dest_piece_any = self.pieces.get(to_sq)
+            if df == 0 and dr == direction and dest_piece_any is None:
+                return "movimiento de peón aparentemente válido (revisar contexto)"
+            elif df == 0 and dr == 2 * direction and fr == start_rank:
+                return "movimiento de peón aparentemente válido (revisar contexto)"
+            elif abs(df) == 1 and dr == direction and dest_piece_any is not None:
+                return "movimiento de peón aparentemente válido (revisar contexto)"
+            else:
+                return "el peón solo avanza recto (1 casilla, 2 desde inicial) o captura en diagonal"
+
+        # Geometría aparentemente válida → pieza bloqueando el camino
+        return "hay otra pieza bloqueando el camino"
 
     # ------------------------------------------------------------------
     # Exportación PGN
