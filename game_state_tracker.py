@@ -312,7 +312,14 @@ class GameStateTracker:
             )
 
         # ------------------------------------------------------------------
-        # 5. Actualizar estado interno (captura y movimiento)
+        # 5. Validar legalidad con lógica propia (antes de actualizar estado)
+        # ------------------------------------------------------------------
+        uci = from_square + to_square
+        is_legal, reason = self._validate_move(from_square, to_square, moving_piece)
+
+        # ------------------------------------------------------------------
+        # 6. Actualizar estado interno — siempre, legal o no, para mantener
+        #    el tracker sincronizado con el tablero físico
         # ------------------------------------------------------------------
         if is_capture:
             defender = self.pieces.pop(to_square, None)
@@ -324,40 +331,25 @@ class GameStateTracker:
         moving_piece.current_square = to_square
         self.pieces[to_square] = moving_piece
 
-        # ------------------------------------------------------------------
-        # 6. Validar legalidad con python-chess
-        # ------------------------------------------------------------------
-        uci   = from_square + to_square
-        san   = None
-        legal = False
+        # Chequear si el oponente quedó en jaque tras el movimiento
+        is_check = self._check_for_check_on_opponent(moving_piece.color)
 
-        try:
-            move = chess.Move.from_uci(uci)
-            if move in self.chess_board.legal_moves:
-                san   = self.chess_board.san(move)   # SAN antes del push
-                self.chess_board.push(move)
-                legal = True
-            else:
-                # Construir SAN manual con "?"
-                if moving_piece.piece_type == "P":
-                    san = (f"{from_square[0]}x{to_square}?"
-                           if is_capture else f"{to_square}?")
-                else:
-                    cap = "x" if is_capture else ""
-                    san = f"{moving_piece.piece_type}{cap}{to_square}?"
-                legal = False
-                # Determinar razón concreta de ilegalidad
-                if not self.chess_board.is_pseudo_legal(move):
-                    reason = self._explain_pseudo_illegal(from_square, to_square, moving_piece)
-                elif not self.chess_board.is_legal(move):
-                    reason = "el movimiento dejaría su propio rey en jaque"
-                else:
-                    reason = "movimiento ilegal (razón desconocida)"
-                msg_parts.append(f"Movimiento {san} ({from_square}→{to_square}) — {reason}")
-        except Exception as exc:
-            san   = f"{to_square}?"
-            legal = False
-            msg_parts.append(f"error de validación: {exc}")
+        # Construir SAN y aplicar sufijo "?" si ilegal
+        san   = self._build_san(from_square, to_square, moving_piece, is_capture, is_check)
+        legal = is_legal
+        if not legal:
+            san += "?"
+            msg_parts.append(f"Movimiento {san} ({from_square}→{to_square}) — {reason}")
+
+        # Intentar empujar al chess_board para que export_pgn funcione en partidas completas.
+        # Silenciado en setups esparsos donde chess_board no coincide con la realidad.
+        if legal and self.chess_board is not None:
+            try:
+                move_obj = chess.Move.from_uci(uci)
+                if move_obj in self.chess_board.legal_moves:
+                    self.chess_board.push(move_obj)
+            except Exception:
+                pass
 
         # ------------------------------------------------------------------
         # 7. Registrar en historial
@@ -386,8 +378,13 @@ class GameStateTracker:
         # ------------------------------------------------------------------
         # 9. Construir mensaje de retorno
         # ------------------------------------------------------------------
-        main_msg = f"{'Captura: ' if is_capture else ''}{san} ({from_square}→{to_square})"
-        full_msg = " | ".join(msg_parts + [main_msg])
+        if legal and is_check:
+            main_msg = f"Movimiento {san} ({from_square}→{to_square}) — jaque al rey"
+        elif legal:
+            main_msg = f"{'Captura: ' if is_capture else ''}{san} ({from_square}→{to_square})"
+        else:
+            main_msg = f"Movimiento {san} ({from_square}→{to_square}) — {reason}"
+        full_msg = " | ".join(msg_parts + [main_msg]) if msg_parts else main_msg
 
         return {
             "success":     True,
@@ -449,6 +446,141 @@ class GameStateTracker:
 
         # Geometría aparentemente válida → pieza bloqueando el camino
         return "hay otra pieza bloqueando el camino"
+
+    # ------------------------------------------------------------------
+    # Validación de movimientos basada en self.pieces
+    # ------------------------------------------------------------------
+
+    def _is_path_clear(self, from_sq: str, to_sq: str) -> bool:
+        """True si todas las casillas entre from_sq y to_sq (exclusivo) están vacías en self.pieces."""
+        ff, fr = ord(from_sq[0]) - ord('a'), int(from_sq[1]) - 1
+        tf, tr = ord(to_sq[0])  - ord('a'), int(to_sq[1])  - 1
+        df, dr = tf - ff, tr - fr
+        step_f = 0 if df == 0 else (1 if df > 0 else -1)
+        step_r = 0 if dr == 0 else (1 if dr > 0 else -1)
+        cur_f, cur_r = ff + step_f, fr + step_r
+        while (cur_f, cur_r) != (tf, tr):
+            sq = chr(ord('a') + cur_f) + str(cur_r + 1)
+            if sq in self.pieces:
+                return False
+            cur_f += step_f
+            cur_r += step_r
+        return True
+
+    def _validate_move(self, from_sq: str, to_sq: str, piece) -> tuple[bool, str]:
+        """
+        Valida si el movimiento de `piece` desde `from_sq` hasta `to_sq` es legal
+        según las reglas geométricas del ajedrez y el estado actual de self.pieces.
+
+        Returns:
+            (True, "")            si el movimiento es legal.
+            (False, reason_str)   si es ilegal, con explicación en español.
+
+        Nota: debe llamarse ANTES de actualizar self.pieces para que el path
+        check vea el tablero en el estado previo al movimiento.
+        """
+        ff, fr = ord(from_sq[0]) - ord('a'), int(from_sq[1]) - 1
+        tf, tr = ord(to_sq[0])  - ord('a'), int(to_sq[1])  - 1
+        df, dr = tf - ff, tr - fr
+        piece_type = piece.piece_type
+
+        # 1. Pieza propia en destino
+        dest_piece = self.pieces.get(to_sq)
+        if dest_piece and dest_piece.color == piece.color:
+            return False, f"hay una pieza propia ({dest_piece.piece_type}) en {to_sq}"
+
+        # 2. Validación por tipo de pieza
+        if piece_type == "K":
+            if max(abs(df), abs(dr)) > 1:
+                return False, "el rey solo puede moverse 1 casilla por jugada"
+
+        elif piece_type == "N":
+            if (abs(df), abs(dr)) not in [(1, 2), (2, 1)]:
+                return False, "el caballo se mueve en L (2+1 o 1+2)"
+
+        elif piece_type == "B":
+            if abs(df) != abs(dr) or (df, dr) == (0, 0):
+                return False, "el alfil solo se mueve en diagonal"
+            if not self._is_path_clear(from_sq, to_sq):
+                return False, "hay una pieza bloqueando el camino del alfil"
+
+        elif piece_type == "R":
+            if df != 0 and dr != 0:
+                return False, "la torre solo se mueve recto horizontal o vertical"
+            if not self._is_path_clear(from_sq, to_sq):
+                return False, "hay una pieza bloqueando el camino de la torre"
+
+        elif piece_type == "Q":
+            if not (df == 0 or dr == 0 or abs(df) == abs(dr)):
+                return False, "la dama se mueve recto o diagonal"
+            if not self._is_path_clear(from_sq, to_sq):
+                return False, "hay una pieza bloqueando el camino de la dama"
+
+        elif piece_type == "P":
+            direction  = 1 if piece.color == "WHITE" else -1
+            start_rank = 1 if piece.color == "WHITE" else 6   # 0-indexed
+            dest_empty = dest_piece is None
+
+            is_advance1 = df == 0 and dr == direction
+            is_advance2 = df == 0 and dr == 2 * direction and fr == start_rank
+            is_diagonal = abs(df) == 1 and dr == direction
+
+            if is_advance1:
+                if not dest_empty:
+                    return False, "el peón no puede avanzar a una casilla ocupada"
+            elif is_advance2:
+                if not dest_empty:
+                    return False, "el peón no puede avanzar a una casilla ocupada"
+                inter_sq = chr(ord('a') + ff) + str(fr + direction + 1)
+                if inter_sq in self.pieces:
+                    return False, "hay una pieza bloqueando el avance doble del peón"
+            elif is_diagonal:
+                if dest_empty:
+                    return False, "el peón solo captura en diagonal cuando hay pieza enemiga"
+            else:
+                return False, "el peón solo avanza recto (1 o 2 desde inicial) o captura en diagonal"
+
+        return True, ""
+
+    def _is_square_attacked(self, square: str, by_color: str) -> bool:
+        """True si alguna pieza de by_color puede legalmente moverse a square."""
+        for sq, piece in list(self.pieces.items()):
+            if piece.color != by_color:
+                continue
+            is_legal, _ = self._validate_move(sq, square, piece)
+            if is_legal:
+                return True
+        return False
+
+    def _check_for_check_on_opponent(self, just_moved_color: str) -> bool:
+        """
+        Tras un movimiento, retorna True si el rey del color opuesto está bajo ataque.
+        Si el rey del oponente no está en self.pieces (setup esparso), retorna False.
+        """
+        opponent = "BLACK" if just_moved_color == "WHITE" else "WHITE"
+        king_sq  = None
+        for sq, piece in self.pieces.items():
+            if piece.color == opponent and piece.piece_type == "K":
+                king_sq = sq
+                break
+        if king_sq is None:
+            return False
+        return self._is_square_attacked(king_sq, just_moved_color)
+
+    def _build_san(self, from_sq: str, to_sq: str, piece,
+                   was_capture: bool, is_check: bool) -> str:
+        """
+        Construye la notación SAN básica sin disambiguación.
+        Suficiente para setups esparsos donde raramente hay ambigüedad.
+        """
+        if piece.piece_type == "P":
+            san = f"{from_sq[0]}x{to_sq}" if was_capture else to_sq
+        else:
+            cap = "x" if was_capture else ""
+            san = f"{piece.piece_type}{cap}{to_sq}"
+        if is_check:
+            san += "+"
+        return san
 
     # ------------------------------------------------------------------
     # Exportación PGN
@@ -631,5 +763,88 @@ if __name__ == "__main__":
     assert result8["san"] is not None and result8["san"].endswith("?"), \
         f"Test 8: SAN debe terminar en '?', got: {result8['san']}"
     print(f"[Test 8] OK — movimiento ilegal: {result8['san']}")
+
+    # ------------------------------------------------------------------
+    # Tests de Fase 4 (nueva validación basada en self.pieces)
+    # ------------------------------------------------------------------
+
+    # Test 9: alfil en c1 solo, mover c1→f4 (diagonal libre) → legal=True, san="Bf4"
+    tracker.reset()
+    g9 = _make_grid()
+    g9[7][2] = "RED"    # c1
+    ok, _ = tracker.initialize_from_snapshot(g9)
+    assert ok, "Test 9: init falló"
+    new9 = copy.deepcopy(g9)
+    new9[7][2] = "EMPTY"   # c1 vacío
+    new9[4][5] = "RED"     # f4: row=4, col=5
+    result9 = tracker.detect_move(new9)
+    assert result9["success"],               f"Test 9 FALLÓ: {result9['message']}"
+    assert result9["legal"],                 f"Test 9: Bc1-f4 debe ser legal"
+    assert result9["san"] == "Bf4",          f"Test 9: SAN debe ser 'Bf4', got {result9['san']}"
+    print(f"[Test 9] OK — alfil diagonal: {result9['san']}")
+
+    # Test 10: torre en a1 + rey negro en a8, torre captura al rey → legal=True, san="Rxa8"
+    tracker.reset()
+    g10 = _make_grid()
+    g10[7][0] = "RED"    # a1 — torre blanca
+    g10[0][0] = "GREEN"  # a8 — rey negro
+    ok, _ = tracker.initialize_from_snapshot(g10)
+    assert ok, "Test 10: init falló"
+    # Ajustar: el init asignó R en a1 y R en a8 (ambas posiciones iniciales de torres).
+    # Re-asignar el rey negro manualmente para el test.
+    tracker.pieces["a8"] = Piece(color="BLACK", piece_type="K",
+                                  original_square="a8", current_square="a8")
+    new10 = copy.deepcopy(tracker.last_team_grid)
+    new10[7][0] = "EMPTY"  # a1 vacío
+    new10[0][0] = "RED"    # a8: GREEN→RED (captura)
+    result10 = tracker.detect_move(new10)
+    assert result10["success"],              f"Test 10 FALLÓ: {result10['message']}"
+    assert result10["legal"],                f"Test 10: Ra1xa8 debe ser legal"
+    assert result10["type"] == "CAPTURE",    f"Test 10: debe ser CAPTURE"
+    assert "x" in result10["san"],           f"Test 10: SAN debe incluir captura, got {result10['san']}"
+    print(f"[Test 10] OK — torre captura rey: {result10['san']}")
+
+    # Test 11: alfil en c1 + peón propio en e3, mover c1→e3 (captura pieza propia)
+    # El team_grid no detecta cambio en e3 (ambos RED), así que el pattern sería:
+    # vacated=[(c1,RED)], appeared=[] → patrón incompleto sólo si e3 fue EMPTY antes.
+    # Configuramos: last_team_grid con e3 EMPTY para que el aparecer en e3 sea detectable.
+    tracker.reset()
+    g11 = _make_grid()
+    g11[7][2] = "RED"    # c1 — alfil blanco
+    ok, _ = tracker.initialize_from_snapshot(g11)
+    assert ok, "Test 11: init falló"
+    # Inyectar peón blanco en e3 en self.pieces (pero NO en last_team_grid, simula descalibre)
+    tracker.pieces["e3"] = Piece(color="WHITE", piece_type="P",
+                                  original_square="e2", current_square="e3")
+    new11 = copy.deepcopy(tracker.last_team_grid)
+    new11[7][2] = "EMPTY"  # c1 vacío
+    new11[5][4] = "RED"    # e3: row=5, col=4 — aparece cubo rojo
+    result11 = tracker.detect_move(new11)
+    assert result11["success"],              f"Test 11 FALLÓ: {result11['message']}"
+    assert not result11["legal"],            f"Test 11: captura propia debe ser ilegal"
+    assert "propia" in result11["message"],  f"Test 11: mensaje debe mencionar pieza propia"
+    print(f"[Test 11] OK — captura propia ilegal: {result11['san']} | {result11['message']}")
+
+    # Test 12: torre blanca e1 + rey negro e8 (camino libre), mover e1→e7 → check
+    tracker.reset()
+    g12 = _make_grid()
+    g12[7][4] = "RED"    # e1 — torre blanca
+    g12[0][4] = "GREEN"  # e8 — rey negro
+    ok, _ = tracker.initialize_from_snapshot(g12)
+    assert ok, "Test 12: init falló"
+    # Re-asignar piezas correctas (init asignó R y K según STARTING_POSITION)
+    tracker.pieces["e1"] = Piece(color="WHITE", piece_type="R",
+                                  original_square="e1", current_square="e1")
+    tracker.pieces["e8"] = Piece(color="BLACK", piece_type="K",
+                                  original_square="e8", current_square="e8")
+    new12 = copy.deepcopy(tracker.last_team_grid)
+    new12[7][4] = "EMPTY"  # e1 vacío
+    new12[1][4] = "RED"    # e7: row=1, col=4 — aparece torre
+    result12 = tracker.detect_move(new12)
+    assert result12["success"],              f"Test 12 FALLÓ: {result12['message']}"
+    assert result12["legal"],                f"Test 12: Re1-e7 debe ser legal"
+    assert result12["san"] == "Re7+",        f"Test 12: SAN debe ser 'Re7+', got {result12['san']}"
+    assert "jaque" in result12["message"],   f"Test 12: mensaje debe mencionar jaque"
+    print(f"[Test 12] OK — torre da jaque: {result12['san']} | {result12['message']}")
 
     print("\nTodos los tests pasaron correctamente.")
