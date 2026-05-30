@@ -105,7 +105,7 @@ The calibration step (R) uses `findChessboardCorners` on the 7×7 inner grid to 
 camera_pipeline.py          Main entry point — live feed, all keyboard controls
 pipeline.py                 Orchestrates YOLO + FEN builder + Stockfish
 board_detector.py           Perspective correction, corner detection strategies
-piece_classifier.py         YOLOv8 wrapper, loads chess_model.pt
+piece_classifier.py         YOLOv8 wrapper, loads chess_model.pt 
 chess_model.pt              YOLOv8 weights for piece detection (not in repo — get from Roboflow)
 generate_aruco_markers.py   Utility to generate ArUco marker PDFs (previous tracking method)
 _aruco_fallback.py          ArUco-based tracking code, kept as reference
