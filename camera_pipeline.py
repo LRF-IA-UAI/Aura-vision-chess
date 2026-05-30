@@ -31,6 +31,7 @@ from pipeline import (run_pipeline, run_basic_pipeline, detector as _board_detec
                       classifier as _classifier, engine as _engine,
                       validate_fen as _validate_fen)
 from piece_classifier import CLASS_TO_FEN
+from game_state_tracker import GameStateTracker
 
 # ---------------------------------------------------------------------------
 # Configuración
@@ -108,6 +109,11 @@ _mode_b = {
     "active":    False,   # True mientras la ventana de ocupación está visible
     "threshold": 15,      # umbral de mean_diff para considerar casilla ocupada
 }
+
+# ---------------------------------------------------------------------------
+# Estado del tracker de partida (tecla I)
+# ---------------------------------------------------------------------------
+_tracker = GameStateTracker()
 
 # ---------------------------------------------------------------------------
 # Dashboard web — MQTT, MJPEG y filtro de estabilidad
@@ -354,7 +360,8 @@ def _put_text_outlined(img, text, pos, scale=0.7, color=_WHITE, thickness=2):
 
 
 def _draw_hud(frame, cam_label, running, pipeline_start,
-              msg_text, msg_color, msg_expire, tracking_status="OFF"):
+              msg_text, msg_color, msg_expire, tracking_status="OFF",
+              tracker_initialized=False, tracker_count=0):
     """Dibuja toda la HUD sobre el frame (modifica in-place)."""
     h, w = frame.shape[:2]
 
@@ -390,12 +397,23 @@ def _draw_hud(frame, cam_label, running, pipeline_start,
     _put_text_outlined(frame, cal_txt, (w - cal_tw - 16, 38),
                        scale=0.45, color=cal_color, thickness=1)
 
+    # --- Indicador de estado del tracker (debajo del indicador de calibración) ---
+    if tracker_initialized:
+        trk_txt   = f"TRACKER: ON  ({tracker_count} piezas)"
+        trk_color = (0, 220, 0)       # verde
+    else:
+        trk_txt   = "TRACKER: OFF  (I para inicializar)"
+        trk_color = (0, 220, 220)     # amarillo
+    (trk_tw, _), _ = cv2.getTextSize(trk_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+    _put_text_outlined(frame, trk_txt, (w - trk_tw - 16, 60),
+                       scale=0.45, color=trk_color, thickness=1)
+
     # --- Barra inferior: instrucciones + etiqueta de cámara ---
     bar_h = 36
     cv2.rectangle(frame, (0, h - bar_h), (w, h), (30, 30, 30), -1)
 
     _put_text_outlined(frame,
-                       "ESPACIO: analisis  |  R: calibrar  |  B: ocupacion  |  P: photo  |  D: debug  |  Q: salir",
+                       "ESPACIO: analisis  |  R: calibrar  |  I: init tracker  |  B: ocupacion  |  P: photo  |  D: debug  |  Q: salir",
                        (12, h - 10), scale=0.55, color=_WHITE)
 
     cam_txt = cam_label
@@ -728,11 +746,17 @@ def _b_build_display(warped: np.ndarray,
                       team_grid: list,
                       diffs: list,
                       count: int,
-                      threshold: int) -> np.ndarray:
+                      threshold: int,
+                      pieces: dict | None = None) -> np.ndarray:
     """
     Construye la imagen de la ventana de ocupación en vivo (modo B).
     Tint por equipo + label R/G/? + notación algebraica + diff + HUD.
     # TODO: orientación asumida con blancas abajo (a1 = bottom-left).
+
+    Args:
+        pieces: dict[str, Piece] del GameStateTracker. Si se proporciona y el
+                tracker está inicializado, dibuja el carácter SAN de la pieza
+                en el centro de cada celda ocupada, sobre el label de equipo.
     """
     display  = warped.copy()
     h, w     = display.shape[:2]
@@ -800,6 +824,26 @@ def _b_build_display(warped: np.ndarray,
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0),       3, cv2.LINE_AA)
                 cv2.putText(display, lbl, (lx, ly),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+
+    # --- Overlay de identidades de piezas del tracker ---
+    if pieces:
+        for row in range(8):
+            for col in range(8):
+                rank  = 8 - row
+                sq    = f"{cols[col]}{rank}"
+                piece = pieces.get(sq)
+                if piece is None:
+                    continue
+                x0 = col * cell_w
+                y0 = row * cell_h
+                lx = x0 + cell_w // 2 - 10
+                ly = y0 + cell_h // 2 + 12
+                # Blancas: texto blanco; negras: texto casi negro con borde blanco
+                txt_color = (255, 255, 255) if piece.color == "WHITE" else (20, 20, 20)
+                cv2.putText(display, piece.piece_type, (lx, ly),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0),   4, cv2.LINE_AA)
+                cv2.putText(display, piece.piece_type, (lx, ly),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, txt_color,   2, cv2.LINE_AA)
 
     # --- HUD superior ---
     title = (f"OCUPACION  |  Vacias: {n_empty}  |  "
@@ -1388,7 +1432,8 @@ def main():
                 )
                 _maybe_publish_board(_team_b)
                 cv2.imshow(WINDOW_OCC, _b_build_display(
-                    warped_b, _grid_b, _team_b, _pcts_b, _count_b, _mode_b["threshold"]
+                    warped_b, _grid_b, _team_b, _pcts_b, _count_b, _mode_b["threshold"],
+                    pieces=_tracker.pieces if _tracker.is_initialized else None,
                 ))
             except Exception as _b_err:
                 pass   # no abortar el feed principal por error en modo B
@@ -1396,7 +1441,9 @@ def main():
         # ---- HUD ----
         _draw_hud(frame, cam_label, running, pipeline_start,
                   msg_text, msg_color, msg_expire,
-                  tracking_status=_tracking_state["tracking_status"])
+                  tracking_status=_tracking_state["tracking_status"],
+                  tracker_initialized=_tracker.is_initialized,
+                  tracker_count=len(_tracker.pieces))
 
         cv2.imshow(WINDOW_MAIN, frame)
 
@@ -1584,6 +1631,45 @@ def main():
                 else:
                     _mode_b["active"] = True
                     print(f"[camera_pipeline] Modo B: activado (umbral={_mode_b['threshold']}).")
+
+        elif key in (ord('i'), ord('I')):
+            # Pre-condición 1: calibración activa
+            if _calibration["matrix"] is None:
+                print("[camera_pipeline] I: requiere calibracion previa con R.")
+                with _state["lock"]:
+                    _state["msg_text"]   = "I: requiere calibracion previa con R"
+                    _state["msg_color"]  = _COLOR_RED
+                    _state["msg_expire"] = time.time() + 2.5
+            # Pre-condición 2: imagen de referencia vacía disponible
+            elif _calibration["empty_warped"] is None:
+                print("[camera_pipeline] I: requiere referencia de tablero vacio (presionar R).")
+                with _state["lock"]:
+                    _state["msg_text"]   = "I: requiere referencia de tablero vacio (presionar R)"
+                    _state["msg_color"]  = _COLOR_RED
+                    _state["msg_expire"] = time.time() + 2.5
+            else:
+                # Computar estado actual del tablero (mismo warp que modo B)
+                try:
+                    _bsz = 800
+                    _bm  = int(_bsz * 0.05)
+                    warped_i = cv2.warpPerspective(frame, _calibration["matrix"], (_bsz, _bsz))
+                    warped_i = warped_i[_bm:_bsz - _bm, _bm:_bsz - _bm]
+                    warped_i = cv2.resize(warped_i, (_bsz, _bsz), interpolation=cv2.INTER_AREA)
+                    _, team_grid_i, _, _ = _b_compute_occupancy(
+                        warped_i, _calibration["empty_warped"], _mode_b["threshold"]
+                    )
+                    success, msg_i = _tracker.initialize_from_snapshot(team_grid_i)
+                    print(f"[camera_pipeline] I: {msg_i}")
+                    with _state["lock"]:
+                        _state["msg_text"]   = f"I: {msg_i}"
+                        _state["msg_color"]  = _COLOR_GREEN if success else _COLOR_RED
+                        _state["msg_expire"] = time.time() + 3.0
+                except Exception as _i_err:
+                    print(f"[camera_pipeline] I: error — {_i_err}")
+                    with _state["lock"]:
+                        _state["msg_text"]   = f"I: error — {_i_err}"
+                        _state["msg_color"]  = _COLOR_RED
+                        _state["msg_expire"] = time.time() + 3.0
 
         elif key in (ord('+'), ord('=')):   # = es + sin shift en teclados sin numpad
             if _mode_b["active"]:
