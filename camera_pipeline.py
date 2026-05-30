@@ -361,7 +361,8 @@ def _put_text_outlined(img, text, pos, scale=0.7, color=_WHITE, thickness=2):
 
 def _draw_hud(frame, cam_label, running, pipeline_start,
               msg_text, msg_color, msg_expire, tracking_status="OFF",
-              tracker_initialized=False, tracker_count=0):
+              tracker_initialized=False, tracker_count=0,
+              current_turn="WHITE", move_history=None):
     """Dibuja toda la HUD sobre el frame (modifica in-place)."""
     h, w = frame.shape[:2]
 
@@ -408,12 +409,39 @@ def _draw_hud(frame, cam_label, running, pipeline_start,
     _put_text_outlined(frame, trk_txt, (w - trk_tw - 16, 60),
                        scale=0.45, color=trk_color, thickness=1)
 
+    # --- Indicador de turno (solo si tracker inicializado) ---
+    if tracker_initialized:
+        if current_turn == "WHITE":
+            turn_txt   = "TURNO: BLANCAS"
+            turn_color = (255, 255, 255)   # blanco
+        else:
+            turn_txt   = "TURNO: NEGRAS"
+            turn_color = (30, 30, 30)      # casi negro — legible con el outline blanco
+        (turn_tw, _), _ = cv2.getTextSize(turn_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+        _put_text_outlined(frame, turn_txt, (w - turn_tw - 16, 82),
+                           scale=0.45, color=turn_color, thickness=1)
+
+    # --- Últimas 3 jugadas (esquina inferior izquierda, encima de la barra) ---
+    if tracker_initialized and move_history:
+        recent = move_history[-3:]
+        bar_h_inner = 36
+        for i, entry in enumerate(recent):
+            piece_color = entry.get("piece_color", "WHITE")
+            move_num    = entry.get("move_number", 1)
+            entry_san   = entry.get("san", "?")
+            hist_txt = (f"{move_num}. {entry_san}"
+                        if piece_color == "WHITE"
+                        else f"{move_num}... {entry_san}")
+            y_hist = h - bar_h_inner - 5 - (len(recent) - 1 - i) * 18
+            _put_text_outlined(frame, hist_txt, (12, y_hist),
+                               scale=0.40, color=_WHITE, thickness=1)
+
     # --- Barra inferior: instrucciones + etiqueta de cámara ---
     bar_h = 36
     cv2.rectangle(frame, (0, h - bar_h), (w, h), (30, 30, 30), -1)
 
     _put_text_outlined(frame,
-                       "ESPACIO: analisis  |  R: calibrar  |  I: init tracker  |  B: ocupacion  |  P: photo  |  D: debug  |  Q: salir",
+                       "SPC: analisis  |  R: calibrar  |  I: init  |  M: movimiento  |  S: guardar PGN  |  B: occ  |  P: photo  |  D: debug  |  Q: salir",
                        (12, h - 10), scale=0.55, color=_WHITE)
 
     cam_txt = cam_label
@@ -1443,7 +1471,9 @@ def main():
                   msg_text, msg_color, msg_expire,
                   tracking_status=_tracking_state["tracking_status"],
                   tracker_initialized=_tracker.is_initialized,
-                  tracker_count=len(_tracker.pieces))
+                  tracker_count=len(_tracker.pieces),
+                  current_turn=_tracker.current_turn,
+                  move_history=_tracker.move_history)
 
         cv2.imshow(WINDOW_MAIN, frame)
 
@@ -1670,6 +1700,87 @@ def main():
                         _state["msg_text"]   = f"I: error — {_i_err}"
                         _state["msg_color"]  = _COLOR_RED
                         _state["msg_expire"] = time.time() + 3.0
+
+        elif key in (ord('m'), ord('M')):
+            # Pre-condición 1: tracker inicializado
+            if not _tracker.is_initialized:
+                print("[camera_pipeline] M: tracker no inicializado.")
+                with _state["lock"]:
+                    _state["msg_text"]   = "M: tracker no inicializado (presiona I primero)"
+                    _state["msg_color"]  = _COLOR_RED
+                    _state["msg_expire"] = time.time() + 2.5
+            # Pre-condición 2: calibración activa
+            elif _calibration["matrix"] is None:
+                with _state["lock"]:
+                    _state["msg_text"]   = "M: requiere calibracion previa con R"
+                    _state["msg_color"]  = _COLOR_RED
+                    _state["msg_expire"] = time.time() + 2.5
+            # Pre-condición 3: imagen de referencia disponible
+            elif _calibration["empty_warped"] is None:
+                with _state["lock"]:
+                    _state["msg_text"]   = "M: requiere referencia de tablero vacio (presionar R)"
+                    _state["msg_color"]  = _COLOR_RED
+                    _state["msg_expire"] = time.time() + 2.5
+            else:
+                try:
+                    _bsz = 800
+                    _bm  = int(_bsz * 0.05)
+                    warped_m = cv2.warpPerspective(frame, _calibration["matrix"], (_bsz, _bsz))
+                    warped_m = warped_m[_bm:_bsz - _bm, _bm:_bsz - _bm]
+                    warped_m = cv2.resize(warped_m, (_bsz, _bsz), interpolation=cv2.INTER_AREA)
+                    _, team_grid_m, _, _ = _b_compute_occupancy(
+                        warped_m, _calibration["empty_warped"], _mode_b["threshold"]
+                    )
+                    prev_turn  = _tracker.current_turn
+                    result_m   = _tracker.detect_move(team_grid_m)
+                    if result_m["success"]:
+                        print(f"[camera_pipeline] [{prev_turn}] "
+                              f"{result_m['san']} "
+                              f"({result_m['from_square']}-{result_m['to_square']})")
+                        if result_m["legal"]:
+                            msg_color_m = _COLOR_GREEN
+                        else:
+                            msg_color_m = _COLOR_YELLOW
+                    else:
+                        print(f"[camera_pipeline] M: {result_m['message']}")
+                        msg_color_m = _COLOR_RED
+                    with _state["lock"]:
+                        _state["msg_text"]   = f"M: {result_m['message']}"
+                        _state["msg_color"]  = msg_color_m
+                        _state["msg_expire"] = time.time() + 3.0
+                except Exception as _m_err:
+                    print(f"[camera_pipeline] M: error — {_m_err}")
+                    with _state["lock"]:
+                        _state["msg_text"]   = f"M: error — {_m_err}"
+                        _state["msg_color"]  = _COLOR_RED
+                        _state["msg_expire"] = time.time() + 3.0
+
+        elif key in (ord('s'), ord('S')):
+            if not _tracker.is_initialized:
+                print("[camera_pipeline] S: tracker no inicializado.")
+                with _state["lock"]:
+                    _state["msg_text"]   = "S: tracker no inicializado (presiona I primero)"
+                    _state["msg_color"]  = _COLOR_RED
+                    _state["msg_expire"] = time.time() + 2.5
+            else:
+                try:
+                    os.makedirs("partidas", exist_ok=True)
+                    ts_s     = time.strftime("%Y%m%d_%H%M%S")
+                    pgn_path = os.path.join("partidas", f"partida_{ts_s}.pgn")
+                    pgn_str  = _tracker.export_pgn()
+                    with open(pgn_path, "w", encoding="utf-8") as _pgn_f:
+                        _pgn_f.write(pgn_str)
+                    print(f"[camera_pipeline] S: partida guardada -> {pgn_path}")
+                    with _state["lock"]:
+                        _state["msg_text"]   = f"S: partida guardada en partidas/partida_{ts_s}.pgn"
+                        _state["msg_color"]  = _COLOR_GREEN
+                        _state["msg_expire"] = time.time() + 2.5
+                except Exception as _s_err:
+                    print(f"[camera_pipeline] S: error — {_s_err}")
+                    with _state["lock"]:
+                        _state["msg_text"]   = f"S: error al guardar — {_s_err}"
+                        _state["msg_color"]  = _COLOR_RED
+                        _state["msg_expire"] = time.time() + 2.5
 
         elif key in (ord('+'), ord('=')):   # = es + sin shift en teclados sin numpad
             if _mode_b["active"]:
