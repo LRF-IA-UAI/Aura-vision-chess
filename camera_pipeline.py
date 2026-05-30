@@ -855,35 +855,32 @@ def _b_build_display(warped: np.ndarray,
             cv2.putText(display, sq, (x0 + 4, y0 + cell_h - 6),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.30, (255, 255, 255), 1, cv2.LINE_AA)
 
-            # label de equipo — centro de celda (solo si ocupada)
-            lbl = _TEAM_LBL.get(team, "")
-            if lbl:
-                lx = x0 + cell_w // 2 - 7
-                ly = y0 + cell_h // 2 + 7
-                cv2.putText(display, lbl, (lx, ly),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0),       3, cv2.LINE_AA)
-                cv2.putText(display, lbl, (lx, ly),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
-
-    # --- Overlay de identidades de piezas del tracker ---
-    if pieces:
-        for row in range(8):
-            for col in range(8):
-                rank  = 8 - row
-                sq    = f"{cols[col]}{rank}"
-                piece = pieces.get(sq)
-                if piece is None:
-                    continue
-                x0 = col * cell_w
-                y0 = row * cell_h
-                lx = x0 + cell_w // 2 - 10
-                ly = y0 + cell_h // 2 + 12
-                # Blancas: texto blanco; negras: texto casi negro con borde blanco
-                txt_color = (255, 255, 255) if piece.color == "WHITE" else (20, 20, 20)
+            # contenido central de la celda
+            piece = pieces.get(sq) if pieces else None
+            if piece is not None:
+                # Caso 1 — pieza trackeada: letra SAN grande, sin label de equipo
+                lx = x0 + cell_w // 2 - 14
+                ly = y0 + cell_h // 2 + 14
+                if piece.color == "WHITE":
+                    border_col = (0,   0,   0)
+                    txt_col    = (255, 255, 255)
+                else:
+                    border_col = (255, 255, 255)
+                    txt_col    = (0,   0,   0)
                 cv2.putText(display, piece.piece_type, (lx, ly),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0),   4, cv2.LINE_AA)
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, border_col, 5, cv2.LINE_AA)
                 cv2.putText(display, piece.piece_type, (lx, ly),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, txt_color,   2, cv2.LINE_AA)
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, txt_col,    3, cv2.LINE_AA)
+            else:
+                # Caso 2/4 — sin pieza trackeada: fallback R/G/? según equipo
+                lbl = _TEAM_LBL.get(team, "")
+                if lbl:
+                    lx = x0 + cell_w // 2 - 7
+                    ly = y0 + cell_h // 2 + 7
+                    cv2.putText(display, lbl, (lx, ly),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0),       3, cv2.LINE_AA)
+                    cv2.putText(display, lbl, (lx, ly),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 1, cv2.LINE_AA)
 
     # --- HUD superior ---
     title = (f"OCUPACION  |  Vacias: {n_empty}  |  "
